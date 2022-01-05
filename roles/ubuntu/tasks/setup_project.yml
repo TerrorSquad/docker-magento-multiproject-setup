@@ -1,0 +1,317 @@
+- name: "{{ project_item.name }}: Register project directory"
+  set_fact:
+    project_directory: "{{ projects_directory }}/{{ project_item.name }}"
+
+- name: "{{ project_item.name }}: Check if directory for project already exists"
+  stat:
+    path: "{{ project_directory }}"
+  register: project_directory_exists
+
+- name: "{{ project_item.name }}: Stop project if currently running"
+  shell: |
+    docker-compose down -v
+  args:
+    chdir: "{{ project_directory }}"
+  when: project_directory_exists.stat.exists
+
+
+- name: "{{ project_item.name }}: Delete project so it could be recreated."
+  file:
+    state: absent
+    path: "{{ project_directory }}"
+  when: (force_recreate is not defined and (project_item.force_recreate | bool)) or (force_recreate is defined and (force_recreate | bool))
+
+- name: "{{ project_item.name }}: Check if directory for project already exists"
+  stat:
+    path: "{{ project_directory }}"
+  register: project_directory_exists
+
+- name: "{{ project_item.name }}: Set up project"
+  block:
+    - name: "{{ project_item.name }}: Download docker wrapper project"
+      shell: |
+        curl -s https://raw.githubusercontent.com/TerrorSquad/docker-magento-quick-install/main/init.sh | bash -s {{ project_item.name }} clone
+      args:
+        chdir: "{{ projects_directory }}"
+
+    - name: "{{ project_item.name }}: Use proper docker container based on PHP version"
+      shell: |
+        sed -r -e "s/(markoshust\/magento-php:)(.+)/\1{{ project_item.php_version  }}/" docker-compose.yml > docker-compose.yml.new \
+        && mv -f docker-compose.yml.new docker-compose.yml;
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Use proper docker container based on ElasticSearch version"
+      shell: |
+        sed -r -e "s/(markoshust\/magento-elasticsearch):(.+)/{{ ((project_item.elasticsearch_image is defined and project_item.elasticsearch_image) or elasticsearch_image) | regex_replace("/", "\\/")  }}:{{ (project_item.elasticsearch_version is defined and project_item.elasticsearch_version) or elasticsearch_version  }}/" docker-compose.yml > docker-compose.yml.new \
+        && mv -f docker-compose.yml.new docker-compose.yml
+      args:
+        chdir: "{{ project_directory }}"
+      when: build_elastic_search is undefined or not (build_elastic_search | bool)
+
+    # TODO:docker-compose - comment ElasticSearch image directive and use build directive
+
+    - name: "{{ project_item.name }}: Download the project into src"
+      ansible.builtin.git:
+        repo: "{{ project_item.repo_url }}"
+        dest: "{{ project_directory }}/src"
+        version: "{{ project_item.main_branch }}"
+        accept_hostkey: true
+        force: true
+
+    - name: "{{ project_item.name }}: Start the containers"
+      shell: |
+        bin/start
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Wait until the database container is up"
+      shell: |
+        docker container ls --filter=health=healthy | grep db | grep -i up
+      register: is_db_container_up
+      until: is_db_container_up.rc == 0
+      retries: 6
+      delay: 5
+
+    - name: "{{ project_item.name }}: Validate database dump file exists {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.xz"
+      stat:
+        path: "{{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.xz"
+      register: database_file_path
+
+    - name: "{{ project_item.name }}: Import database dump {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.xz"
+      shell: xzcat {{ database_file_path.stat.path }} | bin/mysql-root
+      args:
+        chdir: "{{ project_directory }}"
+      when: database_file_path.stat.exists
+      register: import_started
+      async: 600
+      poll: 0
+
+    - name: "{{ project_item.name }}: Mark database import job as started"
+      set_fact:
+        job_database_import: "{{ import_started }}"
+      when: import_started is not skipped and import_started.started == 1
+
+    - block:
+        - name: "{{ project_item.name }}: Validate database dump file exists {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.gz"
+          stat:
+            path: "{{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.gz"
+          register: database_file_path
+
+        - name: "{{ project_item.name }}: Import database dump {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql.gz"
+          shell: zcat {{ database_file_path.stat.path }} | bin/mysql-root
+          args:
+            chdir: "{{ project_directory }}"
+          when: database_file_path.stat.exists | bool
+          register: import_started
+          async: 600
+          poll: 0
+      when: job_database_import is undefined
+
+    - name: "{{ project_item.name }}: Mark database import job as started"
+      set_fact:
+        job_database_import: "{{ import_started }}"
+      when: job_database_import is undefined and import_started is not skipped and import_started.started == 1
+
+    - block:
+        - name: "{{ project_item.name }}: Validate database dump file exists {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql"
+          stat:
+            path: "{{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql"
+          register: database_file_path
+
+        - name: "{{ project_item.name }}: Import database dump {{ project_item.database_dump_directory_path }}/{{ project_item.database_file_name }}.sql"
+          shell: bin/mysql-root < {{ database_file_path.stat.path }}
+          args:
+            chdir: "{{ project_directory }}"
+          when: database_file_path.stat.exists | bool
+          register: import_started
+          async: 600
+          poll: 0
+      when: job_database_import is undefined
+
+    - name: "{{ project_item.name }}: Mark database import job as started"
+      set_fact:
+        job_database_import: "{{ import_started }}"
+      when: job_database_import is undefined and import_started is not skipped and import_started.started == 1
+
+    - name: "{{ project_item.name }}: Stop setting up project."
+      fail:
+        msg: Database dump file not found
+      when: job_database_import is undefined
+
+    - name: "{{ project_item.name }}: Download composer packages"
+      shell: bin/clinotty composer install --ignore-platform-reqs
+      args:
+        chdir: "{{ project_directory }}"
+      register: job_composer_download
+      async: 600
+      poll: 0
+
+    - name: "{{ project_item.name }}: Wait for composer to install packages and database to be imported"
+      async_status:
+        jid: "{{ item }}"
+      register: job_result
+      until: job_result.finished
+      retries: 30
+      delay: 30
+      with_items:
+        - "{{ job_composer_download.ansible_job_id }}"
+        - "{{ job_database_import.ansible_job_id }}"
+
+    - name: "{{ project_item.name }}: Configure website for local development"
+      shell: bin/init-website.sh
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Add base urls to /etc/hosts"
+      shell: sudo bin/add-base-urls-to-hosts
+      args:
+        chdir: "{{ project_directory }}"
+      become_user: root
+      become: true
+
+    - name: "{{ project_item.name }}: Copy env file"
+      copy:
+        src: "{{ project_directory }}/config/env.php"
+        dest: "{{ project_directory }}/src/app/etc"
+        mode: 0644
+
+    - name: "{{ project_item.name }}: Configure nginx"
+      block:
+        - name: "{{ project_item.name }}: multistore configuration"
+          block:
+            - name: "{{ project_item.name }}: Generate nginx mapping"
+              shell: bin/generate-nginx-mapping > config/nginx/mapping.nginx.conf
+              args:
+                chdir: "{{ project_directory }}"
+
+            - name: "{{ project_item.name }}: Create default.conf"
+              shell: cat mapping.nginx.conf > default.conf && cat default.conf.sample >> default.conf
+              args:
+                chdir: "{{ project_directory }}/config/nginx"
+
+            - name: "{{ project_item.name }}: Copy nginx.conf.store.sample to src"
+              copy:
+                src: "{{ project_directory }}/config/nginx/nginx.conf.store.sample"
+                dest: "{{ project_directory }}/config/nginx/nginx.conf"
+              when: project_item.magerun_type == 'store'
+
+            - name: "{{ project_item.name }}: Copy nginx.conf.website.sample to src"
+              copy:
+                src: "{{ project_directory }}/config/nginx/nginx.conf.website.sample"
+                dest: "{{ project_directory }}/config/nginx/nginx.conf"
+              when: project_item.magerun_type == 'website'
+
+          when: project_item.is_multi_store
+
+        - name: "{{ project_item.name }}: single store configuration"
+          block:
+            - name: "{{ project_item.name }}: Create default.conf"
+              copy:
+                src: "{{ project_directory }}/config/nginx/default.conf.sample"
+                dest: "{{ project_directory }}/config/nginx/default.conf"
+
+            - name: "{{ project_item.name }}: Create nginx.conf"
+              copy:
+                src: "{{ project_directory }}/config/nginx/nginx.conf.sample"
+                dest: "{{ project_directory }}/config/nginx/nginx.conf"
+          when: not project_item.is_multi_store
+
+    - name: "{{ project_item.name }}: Disable xdebug check in MFTF"
+      block:
+        - name: "{{ project_item.name }}: Validate file exists"
+          stat:
+            path: "{{ project_directory }}/src/vendor/magento/magento2-functional-testing-framework/src/Magento/FunctionalTestingFramework/_bootstrap.php"
+          register: xdebug_bootstrap_file
+        - block:
+          - name: "{{ project_item.name }}: Comment out the xdebug line"
+            shell: |
+              sed -e "s/xdebug_disable()/\/\/xdebug_disable()/g" {{ xdebug_bootstrap_file.stat.path }} > {{ xdebug_bootstrap_file.stat.path }}.new  \
+              && mv -f {{ xdebug_bootstrap_file.stat.path }}.new {{ xdebug_bootstrap_file.stat.path }}
+            args:
+              chdir: "{{ project_directory }}"
+          when: xdebug_bootstrap_file.stat.exists
+
+    - name: "{{ project_item.name }}: bin/magento module:disable"
+      shell: (bin/clinotty bin/magento module:status {{ item }} | grep -i enabled) && bin/clinotty bin/magento module:disable {{ item }} || true
+      args:
+        chdir: "{{ project_directory }}"
+      with_items: "{{ project_item.modules_to_disable }}"
+      when: project_item.modules_to_disable is defined
+
+    - name: "{{ project_item.name }}: bin/magento setup:upgrade"
+      shell: bin/clinotty bin/magento setup:upgrade
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: bin/magento deploy:mode:set developer"
+      shell: bin/clinotty bin/magento deploy:mode:set developer
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: bin/magento setup:di:compile"
+      shell: bin/clinotty bin/magento setup:di:compile
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: bin/magento setup:static-content:deploy -f"
+      shell: bin/clinotty bin/magento  setup:static-content:deploy -f
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: bin/magento cache:flush"
+      shell: bin/clinotty bin/magento  cache:flush
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Restart containers (required because of nginx changes)"
+      shell: bin/restart
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Wait until the php container is up"
+      shell: |
+        docker container ps | grep php | grep -i up
+      register: is_php_container_up
+      until: is_php_container_up.rc == 0
+      retries: 3
+      delay: 5
+
+    # - name: "{{ project_item.name }}: Check if frontend returns 200"
+    #   uri:
+    #     url: https://magento.test
+    #     status_code: 200
+    #     validate_certs: false
+    # - name: "{{ project_item.name }}: Check if backend returns 200"
+    #   uri:
+    #     url: https://magento.test/admin
+    #     status_code: 200
+    #     validate_certs: false
+
+    - name: "{{ project_item.name }}: Create admin user"
+      shell: |
+        bin/clinotty bin/magento admin:user:create \
+        --admin-user={{ admin_username }} \
+        --admin-password={{ admin_password }} \
+        --admin-email={{ admin_email }} \
+        --admin-firstname={{ admin_firstname }} \
+        --admin-lastname={{ admin_lastname }}
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Stop containers (required because of other projects - ports collisions)"
+      shell: bin/stop
+      args:
+        chdir: "{{ project_directory }}"
+
+    - name: "{{ project_item.name }}: Echo site availability"
+      debug:
+        msg: Site is available at https://magento.test - start the container to access it - bin/start
+
+  when: not project_directory_exists.stat.exists or project_item.force_recreate
+  rescue:
+    - name: "{{ project_item.name }}: Stop containers if setup failed"
+      shell: |
+        bin/stop
+      args:
+        chdir: "{{ project_directory }}"

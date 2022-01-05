@@ -1,0 +1,41 @@
+---
+- name: Check whether passed only of of `--project={project}` or `--all=true`
+  fail:
+    msg: Please pass either `-e project={project}` or `-e all=true`
+  when: (all is undefined and project is undefined) or (all is defined and project is defined)
+
+- import_tasks: load_all_projects.yml
+
+- name: Setting up one project
+  block:
+    - name: Confirm that project exists
+      set_fact:
+        projects: ["{{ project_item }}"]
+      with_list: "{{ projects  }}"
+      loop_control:
+        loop_var: project_item
+      when: project_item.name == project
+      no_log: true
+
+    - name: Print error if project doesn't exist
+      fail:
+        msg: "Project {{ project }} doesn't exist"
+      when: projects is undefined
+  when: all is undefined
+
+- name: Check whether all is truthy
+  fail:
+    msg: all must be defined and truthy
+  when: all is defined and not (all | bool)
+
+- name: Create projects directory
+  file:
+    path: "{{ projects_directory }}"
+    state: directory
+    mode: 0775
+
+- name: Setup each project
+  include_tasks: setup_project.yml
+  with_list: "{{ projects }}"
+  loop_control:
+    loop_var: project_item

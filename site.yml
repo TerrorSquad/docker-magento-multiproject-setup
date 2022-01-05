@@ -1,0 +1,9 @@
+---
+- hosts: localhost
+  connection: local
+  remote_user: root
+  strategy: free
+
+  roles:
+    - role: ubuntu
+      tags: ubuntu

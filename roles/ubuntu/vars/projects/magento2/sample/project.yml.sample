@@ -1,0 +1,19 @@
+# Single project information
+name: magento
+force_recreate: false
+database_dump_directory_path: ~/Projects/Magento/Databases
+database_file_name: magento
+main_branch: master
+repo_url: git@bitbucket.org:namespace/project.git
+is_multi_store: true
+magerun_type: store
+
+# Functionality to be implemented
+# Not sure what to do about magento version
+magento_version: 2.4.2
+# Change docker container version based on these version numbers
+
+php_version: 7.4-fpm
+
+elasticsearch_version: 7.7
+modules_to_disable: []

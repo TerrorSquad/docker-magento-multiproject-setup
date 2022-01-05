@@ -1,0 +1,17 @@
+---
+# vars file for ubuntu
+projects_directory: "{{ ansible_facts.env.HOME }}/Projects/Magento/Projects"
+# e.g. EXCLUDED_PROJECTS: ['essenza']
+# excluded_projects: ['justkidding','sigmatex', 'essenza', 'essenzamaster', 'ecotools', 'ricomoda', 'bedrijfsverlichting']
+use_blacklist: false
+excluded_projects: ['sigmatex']
+
+# Default admin panel user
+admin_username: local
+admin_password: admin123
+admin_firstname: Local
+admin_lastname: Local
+admin_email: local@local.com
+
+elasticsearch_image: markoshust/magento-elasticsearch
+elasticsearch_version: 7.7.1-0

@@ -1,0 +1,37 @@
+---
+
+- name: "Find and register projects variable files in folder roles/ubuntu/vars/projects/magento2"
+  find:
+    paths: "{{ playbook_dir }}/roles/ubuntu/vars/projects/magento2"
+    patterns: "*.yaml,*.yml"
+    file_type: "file"
+    recurse: true
+  register: projects_files
+
+- name: Load projects information into separate variables
+  block:
+    - name: Filter excluded projects
+      include_vars:
+        name: project
+        file: "{{ item.path }}"
+      with_items: "{{ projects_files.files }}"
+      register: projects
+      when: (use_blacklist | bool) and (item.path | dirname | splitext('/') | last not in excluded_projects)
+
+    - name: Read all projects.
+      include_vars:
+        name: project
+        file: "{{ item.path }}"
+      with_items: "{{ projects_files.files }}"
+      register: projects
+
+- name: Combine projects variables into one variable
+  set_fact:
+    projects: "{{ projects.results | json_query('[].[ansible_facts.project]') | json_query('[]') }}"
+
+# TODO: Implement additional filtering of exluded projects
+# - name: Filter out projects exluded in the var/projects/project_name.yml files with the EXCLUDED: true value
+
+# - name: Print variables for all projects
+#   debug:
+#     msg: "{{ projects }}"
